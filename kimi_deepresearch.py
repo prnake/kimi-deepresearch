@@ -97,11 +97,14 @@ def compact_old_tool_messages(messages, keep_rounds=3):
 def load_existing_data(file_path: Path):
     """加载已有的数据，用于断点续跑"""
     if not file_path.exists():
-        return None, [], None
+        return None, [], None, 0, []
     
     messages = []
     query_info = None
     final_result = None
+    max_search_idx = 0
+    all_search_results = []
+    search_results_set = set()
     
     with open(file_path, 'r', encoding='utf-8') as f:
         for line_num, line in enumerate(f):
@@ -114,7 +117,21 @@ def load_existing_data(file_path: Path):
                     query_info = data
                 elif data.get("type") == "message":
                     # 后续行是消息
-                    messages.append(data.get("message"))
+                    message = data.get("message")
+                    messages.append(message)
+                    
+                    # 如果是 tool 消息，提取 search_results 并更新 search_idx
+                    if message.get("role") == "tool" and message.get("search_results"):
+                        search_results = message.get("search_results", [])
+                        for result in search_results:
+                            idx = result.get("idx", -1)
+                            if idx >= 0:
+                                max_search_idx = max(max_search_idx, idx)
+                                # 恢复 search_results 和去重集合
+                                unique_key = f"{result.get('title', '')}|{result.get('url', '')}"
+                                if unique_key not in search_results_set:
+                                    all_search_results.append(result)
+                                    search_results_set.add(unique_key)
                 elif data.get("type") == "final":
                     # 最终结果
                     final_result = data.get("content", "")
@@ -122,7 +139,7 @@ def load_existing_data(file_path: Path):
                 print(f"警告: 解析第 {line_num + 1} 行失败: {e}")
                 continue
     
-    return query_info, messages, final_result
+    return query_info, messages, final_result, max_search_idx, all_search_results
 
 
 def save_data(file_path: Path, data_type: str, data: dict):
@@ -178,7 +195,7 @@ def deep_research(query: str, max_iterations: int = 300, data_dir: str = "data")
     print(f"已加载工具: {Search.name}\n")
     
     # 尝试加载已有数据（断点续跑）
-    query_info, existing_messages, final_result = load_existing_data(file_path)
+    query_info, existing_messages, final_result, max_search_idx, all_search_results = load_existing_data(file_path)
     
     # 如果已经完成，直接返回结果
     if final_result:
@@ -189,7 +206,22 @@ def deep_research(query: str, max_iterations: int = 300, data_dir: str = "data")
     if query_info:
         print(f"检测到已有数据，从断点继续运行...")
         print(f"原始查询: {query_info.get('query')}")
-        print(f"已恢复 {len(existing_messages)} 条消息\n")
+        print(f"已恢复 {len(existing_messages)} 条消息")
+        
+        # 恢复 search_idx 和 search_results
+        if max_search_idx >= 0:
+            client.search.search_idx = max_search_idx + 1
+            client.search.search_results = all_search_results
+            # 恢复去重集合
+            client.search.search_results_set = {
+                f"{r.get('title', '')}|{r.get('url', '')}" 
+                for r in all_search_results
+            }
+            print(f"已恢复 search_idx: {client.search.search_idx} (最大 idx: {max_search_idx})")
+            print(f"已恢复 {len(all_search_results)} 条搜索结果\n")
+        else:
+            print(f"未找到搜索结果，search_idx 保持为 0\n")
+        
         messages = existing_messages
         
         # 检查最后一条 assistant 消息是否已完成（没有 tool_calls）
